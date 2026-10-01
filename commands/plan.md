@@ -16,9 +16,9 @@ Produce a complete plan — formal SPEC (GEARS RIGID/FLEXIBLE), resolved clarifi
 
 | Step | Agent | Artifact |
 |---|---|---|
-| §5 | `bc-harness:specifier` | `.spec/features/[slug]/SPEC.md` |
-| §6 (conditional) | `bc-harness:clarifier` | `SPEC.md` updated in-place |
-| §7 | `bc-harness:planner` | `.spec/features/[slug]/PLAN.md` + `PHASES.md` (view executável pelo `ralph.sh`) + optional `openapi.yaml` / `service.proto` / `asyncapi.yaml` |
+| §5 | `ramos-harness:specifier` | `.spec/features/[slug]/SPEC.md` |
+| §6 (conditional) | `ramos-harness:clarifier` | `SPEC.md` updated in-place |
+| §7 | `ramos-harness:planner` | `.spec/features/[slug]/PLAN.md` + `PHASES.md` (view executável pelo `ralph.sh`) + optional `openapi.yaml` / `service.proto` / `asyncapi.yaml` |
 
 ## Input — `$ARGUMENTS`
 
@@ -165,7 +165,7 @@ Closing lines: unresolved markers count (when > 0), then the execution handoff �
 ## Rules
 
 - **Thin router** — no SPEC/PLAN template content in this file; agents own the shapes.
-- **Delegate plugin-namespaced** (`bc-harness:specifier`, `bc-harness:clarifier`, `bc-harness:planner`), never bare.
+- **Delegate plugin-namespaced** (`ramos-harness:specifier`, `ramos-harness:clarifier`, `ramos-harness:planner`), never bare.
 - **Never write application code.** The pipeline writes only under `.spec/features/[slug]/` (router itself only under `.handoff/`).
 - **No issue tracker** — the confirmed description + ACs are the source of truth; never invent an external reference.
 - Scope grows mid-planning → stop, propose splitting into smaller features and re-running `/plan` per slice.

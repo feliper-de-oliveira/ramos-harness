@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# sail-guard.sh — hook PreToolUse (Bash) do bc-harness.
+# sail-guard.sh — hook PreToolUse (Bash) do ramos-harness.
 #
 # Se o projeto atual usa Laravel Sail (vendor/bin/sail presente), bloqueia
 # comandos que rodariam PHP/DB no host — onde geralmente nao ha PHP instalado

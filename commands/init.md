@@ -63,7 +63,7 @@ After the table, quote any `stale:` lines from step 2 verbatim.
 
 ### 4 — Next step
 
-Pick exactly one action — first rule that matches wins — and **invoke it via the SlashCommand tool** (plugin-namespaced, e.g. `/bc-harness:init:project-description`). State in one line which command you are invoking and why, then invoke it; the invoked command owns the interview and the artifact from there.
+Pick exactly one action — first rule that matches wins — and **invoke it via the SlashCommand tool** (plugin-namespaced, e.g. `/ramos-harness:init:project-description`). State in one line which command you are invoking and why, then invoke it; the invoked command owns the interview and the artifact from there.
 
 1. **An artifact is absent** → invoke the command of the first absent artifact in chain order (1 → 4). Earlier artifacts must exist before later ones make sense.
 2. **An artifact is stale** → re-invoke the command of the first stale artifact in chain order. Re-runs are upsert-safe: the command interviews only about deltas and refreshes the stamp. Note that regenerating it may in turn mark artifacts downstream of it stale — re-check with `/init` afterwards.

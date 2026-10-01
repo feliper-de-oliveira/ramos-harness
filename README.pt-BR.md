@@ -1,4 +1,4 @@
-# Beer and Code Harness (`bc-harness`)
+# Ramos Harness (`ramos-harness`)
 
 Plugin de [Claude Code](https://claude.com/claude-code) com comandos, agentes e scripts para levar um projeto da ideia à implementação de forma estruturada: especificação formal, planejamento em fases e execução autônoma com validação mecânica — sem abrir mão do controle humano nos pontos de decisão.
 
@@ -39,10 +39,10 @@ Transversal a tudo: **`/ai-context`** mantém a árvore de contexto (`AGENTS.md`
 O repositório é um plugin de Claude Code (`.claude-plugin/plugin.json`). Instale via marketplace/caminho local conforme sua configuração de plugins:
 
 ```
-/plugin install bc-harness
+/plugin install ramos-harness
 ```
 
-Os comandos ficam disponíveis com namespace: `/bc-harness:init`, `/bc-harness:plan`, etc. (nesta documentação, abreviados sem o namespace).
+Os comandos ficam disponíveis com namespace: `/ramos-harness:init`, `/ramos-harness:plan`, etc. (nesta documentação, abreviados sem o namespace).
 
 O `ralph.sh` é um script bash independente — copie ou referencie `scripts/ralph.sh` e rode direto no repositório do projeto-alvo.
 
