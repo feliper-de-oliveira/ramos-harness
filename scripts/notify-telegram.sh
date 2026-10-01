@@ -3,7 +3,7 @@
 # notify-telegram.sh — provider Telegram do notify.sh (Bot API, sendMessage).
 #
 # Mensagem pelo stdin; credenciais pelo ambiente (TELEGRAM_BOT_TOKEN,
-# TELEGRAM_CHAT_ID), que o notify.sh carrega de ~/.config/bc-harness/.
+# TELEGRAM_CHAT_ID), que o notify.sh carrega de ~/.config/ramos-harness/.
 # Exit 0 = entregue. Em falha imprime UMA linha curta — nunca o token nem a URL.
 #
 # O token chega ao curl pelo stdin (--config -), nao por argumento: nao aparece

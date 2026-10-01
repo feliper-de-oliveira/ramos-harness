@@ -1605,7 +1605,7 @@ fi
 if case_enabled notify-real-offline; then
   header "43. notify.sh real com Telegram inacessivel -> run verde"
   d=$(new_case notify-real-offline)
-  rc=$(export BC_HARNESS_NOTIFY_CONFIG=/nonexistent TELEGRAM_BOT_TOKEN=123:secretTOKEN \
+  rc=$(export RAMOS_HARNESS_NOTIFY_CONFIG=/nonexistent TELEGRAM_BOT_TOKEN=123:secretTOKEN \
          TELEGRAM_CHAT_ID=42 TELEGRAM_API_BASE=http://127.0.0.1:9 NOTIFICATIONS_ENABLED=true NOTIFY_EVENTS=all; \
        CASE_NOTIFY_BIN="$ROOT/scripts/notify.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
   assert_eq 0 "$rc" "exit 0"

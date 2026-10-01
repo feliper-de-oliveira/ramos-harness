@@ -116,7 +116,7 @@
 #
 # Notificacoes (Telegram etc.): o ralph so emite eventos para o notify.sh ao
 # lado deste script, que le .phases/state/run.tsv e fala com o provider.
-# Sem notify.sh ao lado, ou sem ~/.config/bc-harness/notifications.env, nada
+# Sem notify.sh ao lado, ou sem ~/.config/ramos-harness/notifications.env, nada
 # acontece. Falha de rede nunca derruba o run. Teste: ./notify.sh test
 #   project.started  phase.started  phase.completed  phase.failed
 #   agent.failed (gate 0 vermelho)  needs.input (RALPH-BLOCKED)

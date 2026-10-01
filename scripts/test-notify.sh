@@ -84,7 +84,7 @@ run_notify() {
     cd "$PROJ" || exit 1
     env -u TELEGRAM_BOT_TOKEN -u TELEGRAM_CHAT_ID -u NOTIFICATIONS_ENABLED \
         -u NOTIFICATION_PROVIDER -u NOTIFY_EVENTS -u NOTIFY_TIMEOUT \
-      BC_HARNESS_NOTIFY_CONFIG="${cfg:-$TMP/none.env}" \
+      RAMOS_HARNESS_NOTIFY_CONFIG="${cfg:-$TMP/none.env}" \
       TELEGRAM_API_BASE="${CASE_API:-$API}" \
       ${CASE_ENV:-} bash "$NOTIFY" "$@" 2>&1
   )
@@ -207,12 +207,12 @@ out=$(run_notify "" test)
 assert_eq 1 "$(cat "$TMP/rc")" "teste sem config sai 1"
 assert_has "$out" "nada configurado" "teste explica"
 
-mkdir -p "$PROJ/.bc-harness"
-printf 'NOTIFICATIONS_ENABLED=false\nTELEGRAM_BOT_TOKEN=9:vazado\n' > "$PROJ/.bc-harness/notifications.env"
+mkdir -p "$PROJ/.ramos-harness"
+printf 'NOTIFICATIONS_ENABLED=false\nTELEGRAM_BOT_TOKEN=9:vazado\n' > "$PROJ/.ramos-harness/notifications.env"
 out=$(run_notify "$c" project.started)
-assert_eq "$n" "$(requests)" "projeto desliga via .bc-harness/notifications.env"
+assert_eq "$n" "$(requests)" "projeto desliga via .ramos-harness/notifications.env"
 assert_has "$out" "TELEGRAM_BOT_TOKEN ignorada" "credencial no projeto recusada"
-rm -rf "$PROJ/.bc-harness"
+rm -rf "$PROJ/.ramos-harness"
 
 chmod 644 "$c"
 out=$(run_notify "$c" project.started)

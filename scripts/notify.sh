@@ -18,8 +18,8 @@
 #   agent.failed     needs.input
 #
 # Configuracao (KEY=VALUE; o arquivo e LIDO, nunca executado com `source`):
-#   ~/.config/bc-harness/notifications.env   global — o unico lugar de credenciais
-#   .bc-harness/notifications.env            por projeto — so chaves nao sensiveis
+#   ~/.config/ramos-harness/notifications.env   global — o unico lugar de credenciais
+#   .ramos-harness/notifications.env            por projeto — so chaves nao sensiveis
 #   variaveis de ambiente                    vencem os dois arquivos
 #
 #   NOTIFICATIONS_ENABLED   true (default) | false
@@ -34,13 +34,13 @@
 # silencioso — o harness funciona igual sem notificacoes.
 #
 # Ambiente extra: RALPH_STATE_FILE (default .phases/state/run.tsv),
-# BC_HARNESS_NOTIFY_CONFIG (caminho do arquivo global).
+# RAMOS_HARNESS_NOTIFY_CONFIG (caminho do arquivo global).
 
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-GLOBAL_CONFIG="${BC_HARNESS_NOTIFY_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/bc-harness/notifications.env}"
-PROJECT_CONFIG=".bc-harness/notifications.env"
+GLOBAL_CONFIG="${RAMOS_HARNESS_NOTIFY_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/ramos-harness/notifications.env}"
+PROJECT_CONFIG=".ramos-harness/notifications.env"
 STATE_FILE="${RALPH_STATE_FILE:-.phases/state/run.tsv}"
 
 SECRET_KEYS="TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID"
