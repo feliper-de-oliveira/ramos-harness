@@ -282,6 +282,45 @@ Validated at preflight:
 - Sub-phases as `### Phase N.M:` (do not become their own session)
 - Any other `## ` heading ends the previous phase's capture
 
+## Notifications (Telegram)
+
+ralph pings your phone when something matters — start, phase done, failure, **agent asking for human input**, and end of run — so nobody has to watch the terminal or the board.
+
+```
+ralph.sh ──► .phases/state/run.tsv ──┬──► ralph-watch.sh / ralph-board.py
+   │                                 │
+   └──► notify <event> ──► notify.sh ──► notify-telegram.sh ──► Bot API
+```
+
+ralph only emits the event. `scripts/notify.sh` decides whether it notifies, builds the message from the **same `run.tsv` the board reads** (no parallel state), and hands it to each provider (`notify-<provider>.sh`). Without `notify.sh` next to `ralph.sh`, or without config, nothing happens. Network errors, a bad token or an API outage become one log line (`[notification] telegram ... failed: ... - continuing execution`) — they never break the run.
+
+### Setup
+
+1. In Telegram, open **@BotFather**, send `/newbot`, keep the token (`123456789:AA...`). Treat it as a password.
+2. Send `/start` to your bot, then get your chat id (`read -rs` keeps the token out of shell history):
+   ```bash
+   read -rs TOKEN && curl -s "https://api.telegram.org/bot$TOKEN/getUpdates" | grep -o '"chat":{"id":-\?[0-9]*'; unset TOKEN
+   ```
+3. Create `~/.config/ramos-harness/notifications.env` and `chmod 600` it:
+   ```bash
+   TELEGRAM_BOT_TOKEN="123456789:AA..."
+   TELEGRAM_CHAT_ID="987654321"
+   ```
+   The file is parsed as `KEY=value`, never `source`d.
+4. Test from inside a project: `scripts/notify.sh test` (exits `1` with the reason on failure).
+
+### Enable / disable
+
+Per run: `NOTIFICATIONS_ENABLED=false ./ralph.sh ...`. Per project: `.ramos-harness/notifications.env` with `NOTIFICATIONS_ENABLED=false` (non-secret keys only — tokens there are ignored). Per machine: set it in the global file, or delete the file. Other keys: `NOTIFICATION_PROVIDER` (default `telegram`, comma list), `NOTIFY_EVENTS` (comma list or `all`; default: all but `phase.started`), `NOTIFY_TIMEOUT` (default `10`s).
+
+### Events
+
+`project.started`, `phase.started` (off by default), `phase.completed`, `phase.failed`, `agent.failed` (gate 0 red), `needs.input`, `project.completed`, `project.failed` (includes abort / Ctrl-C).
+
+`needs.input`: every phase prompt tells the agent to end with a `RALPH-BLOCKED: <reason>` line when only a human can unblock it. ralph reads it from the stream (same text channel as `RALPH-TASK`), **stops the phase without burning correction cycles**, shows `bloqueado: <reason>` on the board, and notifies. Re-running ralph resumes the phase.
+
+New provider: add `scripts/notify-<name>.sh` (message on stdin, credentials from env, exit `0` on delivery), add its keys to `SECRET_KEYS` in `notify.sh`, set `NOTIFICATION_PROVIDER=telegram,<name>`. ralph does not change.
+
 ## Agents
 
 Commands are **thin routers** — all template knowledge lives in the agents:
@@ -313,6 +352,9 @@ scripts/
   ralph.sh                     phase-by-phase execution orchestrator
   ralph-watch.sh               live run panel (reads .phases/state/)
   test-ralph.sh                red/green suite for ralph with a mock engine
+  notify.sh                    notification layer (events -> providers)
+  notify-telegram.sh           Telegram provider (Bot API)
+  test-notify.sh               notify suite against a local fake Bot API
   check-init-drift.sh          guards against textual drift of the rules
                                duplicated across the init commands
   check-shell.sh               bash -n + shellcheck over scripts/*.sh
@@ -325,6 +367,7 @@ docs/plans/                    internal hardening plans for the harness
 scripts/test-ralph.sh        # ralph.sh suite — fake `claude`/`codex` binaries
                              # on PATH, zero network, zero tokens; exit 0 = green
 scripts/test-ralph.sh <case> # run a single case
+scripts/test-notify.sh       # notify.sh + Telegram against a local fake Bot API
 scripts/check-shell.sh       # bash -n over all scripts + shellcheck when available
 scripts/check-init-drift.sh  # verbatim anchors for the shared init:* rules
 ```

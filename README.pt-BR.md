@@ -278,6 +278,100 @@ Validado no preflight:
 - Sub-fases em `### Phase N.M:` (não viram sessão própria)
 - Qualquer outro `## ` encerra a captura da fase anterior
 
+## Notificações (Telegram)
+
+O ralph avisa no celular quando algo importa — início, fase concluída, falha, **agente pedindo intervenção humana** e fim do run — sem ninguém olhando o terminal ou o painel.
+
+```
+ralph.sh ──► .phases/state/run.tsv ──┬──► ralph-watch.sh / ralph-board.py
+   │                                 │
+   └──► notify <evento> ──► notify.sh ──► notify-telegram.sh ──► Bot API
+```
+
+O ralph só emite o evento. O `scripts/notify.sh` decide se ele notifica, monta a mensagem lendo o **mesmo `run.tsv` do painel** (nenhum estado paralelo) e entrega a cada provider (`notify-<provider>.sh`). Sem o `notify.sh` ao lado do `ralph.sh`, ou sem configuração, nada acontece. Falha de rede, token errado ou API fora do ar viram uma linha de log (`[notification] telegram unavailable ... - continuing execution`) — nunca derrubam o run.
+
+### 1. Criar o bot
+
+1. No Telegram, abra **@BotFather** e mande `/newbot`.
+2. Escolha nome e username (termina em `bot`).
+3. Guarde o token (`123456789:AA...`). Ele dá controle total do bot: não cole em chat, issue nem commit.
+
+### 2. Descobrir o CHAT_ID
+
+1. Abra a conversa com o seu bot e mande `/start` (sem isso o bot não pode te escrever).
+2. Rode — o `read -rs` evita que o token fique no histórico do shell:
+
+```bash
+read -rs TOKEN && curl -s "https://api.telegram.org/bot$TOKEN/getUpdates" | grep -o '"chat":{"id":-\?[0-9]*'; unset TOKEN
+```
+
+O número após `"id":` é o `TELEGRAM_CHAT_ID` (negativo em grupos). Veio vazio? Mande outra mensagem ao bot e repita.
+
+### 3. Configurar (uma vez por máquina)
+
+```bash
+mkdir -p ~/.config/ramos-harness
+nano ~/.config/ramos-harness/notifications.env
+```
+
+```bash
+TELEGRAM_BOT_TOKEN="123456789:AA..."
+TELEGRAM_CHAT_ID="987654321"
+```
+
+```bash
+chmod 600 ~/.config/ramos-harness/notifications.env
+```
+
+O arquivo é **lido como `CHAVE=valor`, nunca executado** (`source`), e fica fora de qualquer repositório. Permissão diferente de `600` gera aviso a cada envio.
+
+### 4. Testar
+
+```bash
+cd /caminho/do/projeto
+/caminho/do/harness/scripts/notify.sh test
+```
+
+Chega `🧪 BC HARNESS — Telegram configurado corretamente`. Em falha, o comando sai `1` e diz o motivo: `TELEGRAM_BOT_TOKEN ausente`, `token invalido (HTTP 401)`, `chat not found`, `sem conexao`, `timeout`, `Telegram indisponivel (HTTP 502)`.
+
+Para ver um evento real sem rodar um projeto: `scripts/notify.sh phase.completed 1` dentro de um repo que já tem `.phases/state/run.tsv`.
+
+### 5. Ativar / desativar
+
+| Onde | Como |
+|---|---|
+| Neste run | `NOTIFICATIONS_ENABLED=false ./ralph.sh ...` |
+| Neste projeto | `.ramos-harness/notifications.env` com `NOTIFICATIONS_ENABLED=false` |
+| Na máquina | `NOTIFICATIONS_ENABLED=false` no arquivo global, ou apague o arquivo |
+
+O arquivo de projeto aceita só chaves não sensíveis (`NOTIFICATIONS_ENABLED`, `NOTIFICATION_PROVIDER`, `NOTIFY_EVENTS`, `NOTIFY_TIMEOUT`); token ali é ignorado com aviso. Variável de ambiente vence os dois arquivos.
+
+| Chave | Default | |
+|---|---|---|
+| `NOTIFICATIONS_ENABLED` | `true` | `false` desliga |
+| `NOTIFICATION_PROVIDER` | `telegram` | Lista por vírgula (`telegram,whatsapp`) quando houver outros providers |
+| `NOTIFY_EVENTS` | todos menos `phase.started` | Lista por vírgula, ou `all` |
+| `NOTIFY_TIMEOUT` | `10` | Segundos por envio (conexão: até 5) |
+
+### Eventos
+
+| Evento | Default | Quando |
+|---|---|---|
+| `project.started` | ✅ | Run começou |
+| `phase.started` | — | Fase começou |
+| `phase.completed` | ✅ | Fase passou nos gates (com duração e próxima fase) |
+| `phase.failed` | ✅ | Fase reprovada após os ciclos de correção, ou commit falhou |
+| `agent.failed` | ✅ | Gate 0 vermelho: a sessão do Claude/Codex não concluiu (um por ciclo) |
+| `needs.input` | ✅ | O agente emitiu `RALPH-BLOCKED: <motivo>` |
+| `project.completed` | ✅ | Todas as fases verdes |
+| `project.failed` | ✅ | Run terminou com falha, abortou ou levou Ctrl-C |
+
+**`needs.input`**: o prompt de cada fase ensina o agente a terminar com uma linha `RALPH-BLOCKED: <motivo>` quando só um humano pode destravar (decisão de produto, acesso, credencial). O ralph lê a linha do stream — mesmo canal textual do `RALPH-TASK` —, **para a fase sem queimar ciclos de correção** (repetir não resolve um bloqueio), registra `bloqueado: <motivo>` no painel e notifica. Re-rodar o ralph depois de resolver retoma a fase (o trabalho parcial vira commit `wip`).
+
+### Novo provider
+
+Crie `scripts/notify-<nome>.sh`: lê a mensagem (texto puro) do stdin, credenciais do ambiente, sai `0` se entregou ou imprime uma linha curta e sai `1`. Adicione as chaves dele a `SECRET_KEYS` no `notify.sh` e use `NOTIFICATION_PROVIDER=telegram,<nome>`. O ralph não muda.
+
 ## Agentes
 
 Os comandos são **roteadores finos** — todo conhecimento de template vive nos agentes:
@@ -309,6 +403,9 @@ scripts/
   ralph.sh                     orquestrador de execução por fases
   ralph-watch.sh               painel ao vivo do run (lê .phases/state/)
   test-ralph.sh                suite red/green do ralph com engine mock
+  notify.sh                    camada de notificações (eventos -> providers)
+  notify-telegram.sh           provider Telegram (Bot API)
+  test-notify.sh               suite do notify com Bot API falsa local
   check-init-drift.sh          guarda contra drift textual das regras
                                duplicadas nos comandos init
   check-shell.sh               bash -n + shellcheck em scripts/*.sh
@@ -321,6 +418,7 @@ docs/plans/                    planos de hardening internos do harness
 scripts/test-ralph.sh        # suite do ralph.sh — binários fake `claude`/`codex`
                              # no PATH, zero rede, zero token; exit 0 = verde
 scripts/test-ralph.sh <caso> # roda um caso específico
+scripts/test-notify.sh       # notify.sh + Telegram contra Bot API falsa local
 scripts/check-shell.sh       # bash -n em todos os scripts + shellcheck se disponível
 scripts/check-init-drift.sh  # âncoras verbatim das regras compartilhadas dos init:*
 ```
