@@ -28,6 +28,10 @@
 #   --max-cycles N           ciclos de correcao por fase (default: 3)
 #   --no-verify              desliga o gate 3 (equivale a RALPH_VERIFY=off)
 #   --test-cmd "<cmd>"       comando de teste do projeto (gate 2)
+#   --effort <nivel>         reasoning effort do codex: none|minimal|low|medium|
+#                            high|xhigh (default: medium). Sem isso o codex usa o
+#                            do config.toml, que pode ser "none" — fraco demais
+#                            para fechar uma fase.
 #   --dashboard              painel ao vivo no terminal (requer ralph-watch.sh
 #                            ao lado deste script); os logs vao para
 #                            .phases/logs/ralph.log
@@ -36,10 +40,14 @@
 #   O estado do run e SEMPRE publicado em .phases/state/ (run.tsv + live.tsv),
 #   com ou sem --dashboard. Para acompanhar de outro terminal:
 #       ./ralph-watch.sh /caminho/do/repo
+#   ou, no navegador (http://127.0.0.1:3847, via ralph-board.py):
+#       ./ralph.sh board [/caminho/do/repo]
 #   No engine claude a sessao roda com --output-format stream-json, o que da
 #   progresso POR TASK em tempo real: o prompt manda o agente registrar uma
 #   tarefa por item `- [ ]` da fase, e o ralph le essas transicoes do stream.
-#   No engine codex nao ha stream equivalente: a granularidade e por fase.
+#   No engine codex a sessao roda com `codex exec --json`: o mesmo leitor de
+#   stream traduz os eventos (comando, arquivo editado, RALPH-TASK) em progresso,
+#   e o terminal mostra so a atividade — nunca o codigo que o agente escreve.
 #
 # Input (primeiro arquivo posicional). Sem argumento, resolve nesta ordem:
 #   1. .spec/init/project-phases.md      (cadeia init)
@@ -92,6 +100,7 @@
 #   RALPH_TEST_CMD           comando de teste (gate 2); --test-cmd tem prioridade
 #   RALPH_VERIFY             gate 3: always (default) | auto | off
 #   RALPH_VERIFY_MODEL       modelo do verificador (default: sonnet no claude)
+#   RALPH_EFFORT             reasoning effort do codex; --effort tem prioridade
 #   RALPH_MAX_CYCLES         ciclos de correcao por fase (default: 3)
 #   RALPH_MAX_LIMIT_WAITS    esperas consecutivas por limite, por fase (default: 20)
 #   RALPH_LIMIT_WAIT_DEFAULT fallback de espera em segundos (default: 1800)
@@ -104,6 +113,16 @@
 #   RALPH_PHASE_TOTAL        total de fases do run
 #   RALPH_PHASE_ATTEMPT      ciclo corrente (1 = implementacao inicial)
 #   RALPH_PHASE_MAX_ATTEMPTS igual a RALPH_MAX_CYCLES
+#
+# Notificacoes (Telegram etc.): o ralph so emite eventos para o notify.sh ao
+# lado deste script, que le .phases/state/run.tsv e fala com o provider.
+# Sem notify.sh ao lado, ou sem ~/.config/bc-harness/notifications.env, nada
+# acontece. Falha de rede nunca derruba o run. Teste: ./notify.sh test
+#   project.started  phase.started  phase.completed  phase.failed
+#   agent.failed (gate 0 vermelho)  needs.input (RALPH-BLOCKED)
+#   project.completed  project.failed (inclui Ctrl-C/abort)
+#   RALPH_NOTIFY_BIN         caminho alternativo do notify.sh
+#   NOTIFICATIONS_ENABLED    false desliga neste run
 #
 # Exit code: 0 = todas as fases verdes; 1 = alguma falhou ou abortou.
 #
@@ -122,11 +141,21 @@ TEST_CMD_FLAG=""
 MAX_CYCLES="${RALPH_MAX_CYCLES:-3}"
 VERIFY_MODE="${RALPH_VERIFY:-always}"
 VERIFY_MODEL=""
+EFFORT="${RALPH_EFFORT:-medium}"
 DASHBOARD=false
+
+# `ralph board [repo]`: so o quadro web, sem run. Leitor puro do estado.
+if [ "${1:-}" = "board" ]; then
+  shift
+  ( sleep 1; xdg-open http://127.0.0.1:3847 || open http://127.0.0.1:3847 ) >/dev/null 2>&1 &
+  exec python3 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ralph-board.py" "$@"
+fi
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --engine)      ENGINE="$2"; shift 2 ;;
+    --effort)      EFFORT="$2"; shift 2 ;;
+    --effort=*)    EFFORT="${1#*=}"; shift ;;
     --engine=*)    ENGINE="${1#*=}"; shift ;;
     --from)        FROM_PHASE="$2"; shift 2 ;;
     --from=*)      FROM_PHASE="${1#*=}"; shift ;;
@@ -137,7 +166,7 @@ while [[ $# -gt 0 ]]; do
     --keep-going)  KEEP_GOING=true; shift ;;
     --no-verify)   VERIFY_MODE="off"; shift ;;
     --dashboard)   DASHBOARD=true; shift ;;
-    -h|--help)     sed -n '2,82p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,84p' "$0"; exit 0 ;;
     *)             INPUT_FILE="$1"; shift ;;
   esac
 done
@@ -148,6 +177,9 @@ PROMPT_DIR=".phases/prompts"
 STATE_DIR=".phases/state"
 MANIFEST="$PHASES_DIR/manifest.txt"
 PROGRESS_FILE="$PHASES_DIR/.progress"
+# .phases/ e estado do ralph: fica fora de toda checagem e todo commit, mesmo
+# num projeto que o versionou por engano (senao a arvore nunca fica limpa).
+GIT_SCOPE=(-- . ':(exclude).phases')
 RUN_STATE="$STATE_DIR/run.tsv"
 LIVE_STATE="$STATE_DIR/live.tsv"
 RALPH_LOG="$LOG_DIR/ralph.log"
@@ -179,6 +211,20 @@ log()     { emit "${BLUE}[$(date '+%H:%M:%S')]${NC} $1"; }
 success() { emit "${GREEN}[$(date '+%H:%M:%S')] $1${NC}"; }
 warn()    { emit "${YELLOW}[$(date '+%H:%M:%S')] $1${NC}"; }
 fail()    { emit "${RED}[$(date '+%H:%M:%S')] $1${NC}"; }
+
+# O ralph so emite o evento: o notify.sh decide se notifica, monta a mensagem
+# a partir do run.tsv e fala com o provider. Sem ele ao lado, no-op — o
+# ralph.sh continua copiavel sozinho. Nunca derruba o run.
+NOTIFY_BIN="${RALPH_NOTIFY_BIN:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/notify.sh}"
+
+notify() {
+  [ -f "$NOTIFY_BIN" ] || return 0
+  local line
+  while IFS= read -r line; do
+    log "$line"
+  done < <(RALPH_STATE_FILE="$RUN_STATE" bash "$NOTIFY_BIN" "$@" < /dev/null 2>&1 || true)
+  return 0
+}
 
 format_duration() {
   local total_seconds=$1
@@ -406,6 +452,14 @@ preflight_checks() {
     exit 1
   fi
 
+  case "$EFFORT" in
+    none|minimal|low|medium|high|xhigh) ;;
+    *)
+      fail "Valor invalido para --effort: '$EFFORT'. Use none, minimal, low, medium, high ou xhigh."
+      exit 1
+      ;;
+  esac
+
   case "$VERIFY_MODE" in
     auto|always|off) ;;
     *)
@@ -447,16 +501,32 @@ preflight_checks() {
   exclude_phases_dir
 
   # Arvore limpa: 'git add -A' da primeira fase engoliria trabalho nao commitado.
-  if [ -n "$(git status --porcelain)" ]; then
-    fail "Arvore de trabalho suja. ralph commita por fase e engoliria suas mudancas."
-    fail "Commite ou stashe antes de rodar:"
-    git status --short | sed 's/^/    /'
-    exit 1
+  # Excecao: a sujeira e de uma fase que o run anterior comecou e nao terminou
+  # (limite de uso, Ctrl-C, terminal fechado, fase reprovada). Vira wip e o
+  # loop retoma essa fase, que continua fora do .progress.
+  if worktree_dirty; then
+    local stopped
+    stopped=$(interrupted_phase)
+    if [ -z "$stopped" ]; then
+      fail "Arvore de trabalho suja. ralph commita por fase e engoliria suas mudancas."
+      fail "Commite ou stashe antes de rodar:"
+      git status --short "${GIT_SCOPE[@]}" | sed 's/^/    /'
+      exit 1
+    fi
+    warn "Run anterior parou na fase $stopped com trabalho nao commitado:"
+    git status --short "${GIT_SCOPE[@]}" | sed 's/^/    /'
+    commit_wip "$stopped"
+    log "Retomando a fase $stopped sobre o commit wip."
+  fi
+  if [ -n "$(git ls-files "$PHASES_DIR")" ]; then
+    warn ".phases/ esta versionado neste repo (o ralph ignora). Para tirar: git rm -r --cached .phases"
   fi
 
   resolve_test_cmd
 
-  success "Pre-checks OK (engine: $ENGINE, input: $INPUT_FILE)"
+  local effort_note=""
+  [[ "$ENGINE" == "codex" ]] && effort_note=", effort: $EFFORT"
+  success "Pre-checks OK (engine: $ENGINE${effort_note}, input: $INPUT_FILE)"
 }
 
 # ---------------------------------------------------------------------------
@@ -464,6 +534,20 @@ preflight_checks() {
 # ---------------------------------------------------------------------------
 
 manifest_entries() { grep -v '^#' "$MANIFEST" || true; }
+
+worktree_dirty() { [ -n "$(git status --porcelain "${GIT_SCOPE[@]}")" ]; }
+
+# Ultima fase que o run anterior comecou (tem prompt gerado) e nao concluiu
+# (fora do .progress). Vazio se nenhuma: a sujeira nao e do ralph.
+interrupted_phase() {
+  [ -f "$MANIFEST" ] || return 0
+  local file num title hit=""
+  while IFS='|' read -r file num title; do
+    is_phase_done "$file" && continue
+    compgen -G "$PROMPT_DIR/${file%.md}.*.txt" > /dev/null && hit="$num"
+  done < <(manifest_entries)
+  echo "$hit"
+}
 
 split_phases() {
   log "Quebrando $INPUT_FILE em fases..."
@@ -651,6 +735,7 @@ state_init() {
     [pid]="$$"
     [run]="run-$(date '+%m%d-%H%M%S')"
     [cycle_max]="$MAX_CYCLES"
+    [keep_going]="$KEEP_GOING"
     [test_cmd]="${TEST_CMD:-—}"
     [phase_cur]=""
     [cycle]=""
@@ -711,6 +796,8 @@ state_phase_begin() {
   META[cycle]="$cycle"
   META[gate]=""
   META[activity]="iniciando a sessao do engine"
+  # Relogio da fase conta desde o primeiro ciclo, nao reinicia na correcao.
+  [ -n "${META[tstart_$num]:-}" ] || META[tstart_$num]="$(date +%s)"
   local i
   for ((i = 1; i <= ${TK_COUNT[$num]:-0}; i++)); do
     # No ciclo de correcao as tasks ja confirmadas pelo verificador permanecem.
@@ -724,6 +811,7 @@ state_phase_end() {
   local num="$1" status="$2"
   PH_STATUS[$num]="$status"
   META[activity]=""
+  META[tdur_$num]=$(( $(date +%s) - ${META[tstart_$num]:-$(date +%s)} ))
   if [ "$status" = "done" ]; then
     local i
     for ((i = 1; i <= ${TK_COUNT[$num]:-0}; i++)); do TK_STATUS[$num:$i]="done"; done
@@ -999,6 +1087,37 @@ stream_watch() {
         activity="atualizou a lista de tarefas"
         sw_flush
         ;;
+      # --- codex exec --json -----------------------------------------------
+      *'"type":"item.started"'*'"type":"command_execution"'*)
+        val=$(json_text "$line" command) || val=""
+        val="${val#* -lc }"; val="${val#\'}"; val="${val%\'}"
+        activity="bash: ${val:0:60}"
+        sw_flush
+        ;;
+      *'"type":"item.completed"'*'"type":"file_change"'*)
+        local rest2="$line"
+        while [[ "$rest2" == *'"path":"'* ]]; do
+          rest2="${rest2#*'"path":"'}"
+          val="${rest2%%\"*}"
+          activity="edit: $(basename -- "$val")"
+          sw_infer_from_file "$val"
+        done
+        sw_flush
+        ;;
+      *'"type":"todo_list"'*)
+        local rest3="$line" i3=0 running=0
+        agent_list_used=1
+        st=()
+        while [[ "$rest3" == *'"completed":'* ]]; do
+          rest3="${rest3#*'"completed":'}"
+          i3=$((i3 + 1))
+          if [[ "$rest3" == true* ]]; then st["$i3"]="done"
+          elif [ "$running" -eq 0 ]; then st["$i3"]="running"; running=1
+          else st["$i3"]="pending"; fi
+        done
+        activity="atualizou a lista de tarefas"
+        sw_flush
+        ;;
       # --- atividade corrente ----------------------------------------------
       *'"type":"tool_use"'*)
         tool=$(json_str "$line" name) || tool=""
@@ -1065,10 +1184,22 @@ PREAMBLE
 # O painel acompanha a fase task a task lendo as transicoes da lista de tarefas
 # do agente no stream. Sem este bloco o ralph so sabe "fase em execucao" e o
 # progresso por task fica parado ate o gate 3.
-# So faz sentido no claude: o codex nao expoe um stream equivalente.
 task_protocol_block() {
-  [[ "$ENGINE" == "claude" ]] || return 0
   cat <<'PROTO'
+
+## Execucao autonoma (obrigatorio)
+Voce roda sem humano do outro lado: ninguem vai responder perguntas nem aprovar
+passos. Nao pare para pedir confirmacao, nao encerre com "posso continuar?" ou
+com uma lista de proximos passos. Trabalhe ate TODOS os itens desta fase
+estarem implementados e a suite de testes passar. So encerre antes disso se
+estiver realmente bloqueado — falta uma decisao ou um acesso que so um humano
+pode dar, e nao ha escolha razoavel a fazer sozinho. Nesse caso termine com uma
+linha isolada, com o motivo em uma frase:
+
+    RALPH-BLOCKED: <o que falta e qual decisao o humano precisa tomar>
+
+O orquestrador para a fase e chama o operador. Nao use para duvidas que voce
+consegue resolver lendo o codigo ou o plano.
 
 ## Protocolo de progresso (obrigatorio)
 Um orquestrador externo le a sua saida em tempo real para mostrar ao operador
@@ -1242,7 +1373,7 @@ detect_usage_limit() {
   if [[ "$ENGINE" == "claude" ]]; then
     pattern='usage limit reached|hit your (session|usage|[0-9]+-hour) limit|[0-9]+-hour limit reached|"api_error_status"[[:space:]]*:[[:space:]]*429'
   else
-    pattern='rate limit reached|quota exceeded|usage limit reached|too many requests'
+    pattern='rate limit reached|quota exceeded|usage limit reached|hit your usage limit|too many requests'
   fi
 
   grep -qiE "$pattern" <<< "$tail_txt" || return 1
@@ -1258,7 +1389,7 @@ detect_usage_limit() {
   # Horario humano ("resets 11:10am", "resets at 3pm"): resolve para a proxima
   # ocorrencia. Sem isso o run cai no fallback de 30min mesmo sabendo a hora.
   if [ -z "$epoch" ]; then
-    human=$(grep -oiE 'resets?[[:space:]]+(at[[:space:]]+)?[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)' <<< "$tail_txt" \
+    human=$(grep -oiE '(resets?|try again)[[:space:]]+(at[[:space:]]+)?[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)' <<< "$tail_txt" \
       | grep -oiE '[0-9]{1,2}(:[0-9]{2})?[[:space:]]*(am|pm)' | tail -1 || true)
     if [ -n "$human" ]; then
       epoch=$(date -d "$human" +%s 2>/dev/null || true)
@@ -1338,9 +1469,23 @@ run_engine() {
 
     if [[ "$ENGINE" == "codex" ]]; then
       if [[ "$mode" == "verify" ]]; then
-        codex exec --sandbox read-only "${model_args[@]}" - < "$prompt_file" 2>&1 | tee "$log_file" || rc=$?
+        # O output bruto do codex despeja cada arquivo que ele le. Vai inteiro
+        # para o log (o gate 3 le as linhas TASK de la); o terminal ve so a
+        # resposta final, como no claude.
+        rm -f "$log_file.last"
+        codex exec -c model_reasoning_effort="$EFFORT" --sandbox read-only "${model_args[@]}" -o "$log_file.last" - \
+          < "$prompt_file" > "$log_file" 2>&1 || rc=$?
+        cat "$log_file.last" 2> /dev/null || true
       else
-        codex exec --sandbox danger-full-access - < "$prompt_file" 2>&1 | tee "$log_file" || rc=$?
+        local quiet=0
+        $DASHBOARD && quiet=1
+        if codex exec -c model_reasoning_effort="$EFFORT" --json --sandbox danger-full-access - < "$prompt_file" 2>&1 \
+             | tee "$log_file" \
+             | stream_watch "$LIVE_STATE" "${RALPH_PHASE_NUM:-0}" "$quiet" "$CURRENT_PHASE_FILE"; then
+          rc=0
+        else
+          rc=$?
+        fi
       fi
     else
       # < /dev/null: claude -p le stdin quando nao e TTY. Sem o redirect ele
@@ -1412,6 +1557,17 @@ gate0_engine_finished() {
     fi
   fi
 
+  # Sessao de implementacao do codex (--json): o turno tem que fechar com
+  # turn.completed. Eventos "error" soltos podem ser reconexao que se recupera;
+  # so turn.failed ou a falta do fechamento reprovam. O verificador roda sem
+  # --json e cai no exit code.
+  if [[ "$ENGINE" == "codex" ]] && grep -q '^{"type":"thread.started"' "$log_file"; then
+    if grep -q '^{"type":"turn.failed"' "$log_file" || ! grep -q '^{"type":"turn.completed"' "$log_file"; then
+      GATE_CAUSE="O codex nao concluiu o turno. Ultimos eventos:"$'\n'"$(grep -E '^\{"type":"(turn\.failed|error)"' "$log_file" | tail -n 3; tail -n 5 "$log_file" | cut -c1-300)"
+      return 1
+    fi
+  fi
+
   if [ "$rc" -ne 0 ]; then
     GATE_CAUSE="O engine saiu com codigo $rc. Ultimas linhas do output:"$'\n'"$(tail -n 40 "$log_file")"
     return 1
@@ -1424,8 +1580,8 @@ gate0_engine_finished() {
 # Sem mutar o index.
 tree_signature() {
   {
-    git status --porcelain
-    git diff HEAD
+    git status --porcelain "${GIT_SCOPE[@]}"
+    git diff HEAD "${GIT_SCOPE[@]}"
     git ls-files --others --exclude-standard -z | xargs -0 -r sha256sum 2> /dev/null
   } 2> /dev/null | sha256sum | cut -c1-16
 }
@@ -1543,9 +1699,20 @@ gate3_independent_verify() {
 # Execucao de fase
 # ---------------------------------------------------------------------------
 
+# Motivo do RALPH-BLOCKED da sessao (vazio se nenhum). O texto do agente chega
+# dentro de strings JSON (stream-json / codex --json): corta em \ e aspas. O
+# motivo nao pode comecar com '<' — e o molde do prompt, nao um bloqueio.
+blocked_reason() {
+  { grep -oE 'RALPH-BLOCKED:[[:space:]]*[^"\\<[:space:]][^"\\]*' "$1" 2> /dev/null || true; } \
+    | tail -n 1 | sed -E 's/^RALPH-BLOCKED:[[:space:]]*//'
+}
+
+# Causa curta para notificacao: o log inteiro fica em .phases/logs/.
+cause_brief() { printf '%s\n' "$GATE_CAUSE" | head -n 4 | cut -c1-200; }
+
 commit_phase() {
   local phase_num="$1" phase_title="$2"
-  git add -A
+  git add -A && git reset -q -- "$PHASES_DIR"
   if git diff --cached --quiet; then
     fail "Nada para commitar apos os gates — estado inesperado."
     return 1
@@ -1556,8 +1723,8 @@ commit_phase() {
 
 commit_wip() {
   local phase_num="$1"
-  [ -n "$(git status --porcelain)" ] || return 0
-  git add -A
+  worktree_dirty || return 0
+  git add -A && git reset -q -- "$PHASES_DIR"
   git commit -q -m "wip(phase-${phase_num}): incomplete — see .phases/logs/"
   warn "Commit wip criado para a fase $phase_num — a proxima fase parte de arvore limpa"
 }
@@ -1578,6 +1745,7 @@ run_phase() {
 
   echo ""
   log "[$seq/$total] Phase $phase_num: $phase_title"
+  notify phase.started "$phase_num"
 
   local cycle=1
   while [ "$cycle" -le "$MAX_CYCLES" ]; do
@@ -1599,6 +1767,23 @@ run_phase() {
     run_engine "$prompt_file" "$log_file" impl || rc=$?
 
     state_absorb_live "$phase_num"
+
+    # O agente pediu um humano: ciclo de correcao nao resolve, so queimaria
+    # tokens contra o mesmo bloqueio. Para a fase e chama o operador.
+    local blocked
+    blocked=$(blocked_reason "$log_file")
+    if [ -n "$blocked" ]; then
+      LAST_GATE="bloqueio — o agente pediu intervencao humana"
+      GATE_CAUSE="$blocked"
+      state_meta last_error "bloqueado: ${blocked:0:60}"
+      state_phase_end "$phase_num" failed
+      fail "Phase $phase_num: $phase_title — BLOQUEADA, precisa de intervencao humana:"
+      fail "    $blocked"
+      fail "Logs em: $LOG_DIR/${phase_file%.md}.*"
+      notify needs.input "$phase_num" "$blocked"
+      return 1
+    fi
+
     state_meta activity "avaliando os gates"
     GATE_CAUSE=""
 
@@ -1623,6 +1808,7 @@ run_phase() {
       LAST_GATE="gate 0 — engine nao concluiu"
       fail "Gate 0 vermelho"
       gate_verdict="red"
+      notify agent.failed "$phase_num" "$(cause_brief)"
     else
       state_gate "$phase_num" 0 pass
       if [ "$session_wrote" -eq 1 ]; then state_gate "$phase_num" 1 pass
@@ -1663,7 +1849,7 @@ run_phase() {
 
       # Gates verdes e nada a commitar => a fase ja estava implementada em HEAD
       # (run anterior commitada, tasks [x], codigo escrito a mao).
-      if [ -z "$(git status --porcelain)" ]; then
+      if ! worktree_dirty; then
         success "Phase $phase_num: $phase_title — JA IMPLEMENTADA (nada a commitar)"
         if [ "$GATE3_RAN" -eq 1 ]; then
           log "Gates 2 e 3 verdes contra o codigo em HEAD; nenhum commit criado."
@@ -1672,6 +1858,7 @@ run_phase() {
         fi
         mark_phase_done "$phase_file"
         state_phase_end "$phase_num" done
+        notify phase.completed "$phase_num"
         return 0
       fi
 
@@ -1679,10 +1866,12 @@ run_phase() {
       if ! commit_phase "$phase_num" "$phase_title"; then
         LAST_GATE="commit"
         state_phase_end "$phase_num" failed
+        notify phase.failed "$phase_num" "Gates verdes, mas o commit da fase falhou."
         return 1
       fi
       mark_phase_done "$phase_file"
       state_phase_end "$phase_num" done
+      notify phase.completed "$phase_num"
       return 0
     fi
 
@@ -1695,12 +1884,12 @@ run_phase() {
   fail "Ultima causa ($LAST_GATE):"
   printf '%s\n' "$GATE_CAUSE" | head -n 20 | sed 's/^/    /'
   fail "Logs em: $LOG_DIR/${phase_file%.md}.*"
+  notify phase.failed "$phase_num" "Reprovada apos $MAX_CYCLES ciclos ($LAST_GATE):"$'\n'"$(cause_brief)"$'\n\n'"Logs: $LOG_DIR/${phase_file%.md}.*"
 
-  # O trabalho parcial fica na arvore; o preflight da proxima execucao exige
-  # arvore limpa. Diga o que fazer em vez de deixar o dev descobrir no abort.
-  if [ -n "$(git status --porcelain)" ]; then
-    warn "O trabalho parcial desta fase ficou na arvore. Antes de re-rodar o ralph:"
-    warn "    commite (o ralph revalida a fase e segue) ou 'git checkout -- . && git clean -fd' (descarta)"
+  # O trabalho parcial fica na arvore; o proximo run o salva em wip e retoma.
+  if worktree_dirty; then
+    warn "O trabalho parcial desta fase ficou na arvore. Re-rodar o ralph salva em commit wip e retoma a fase."
+    warn "    Para descartar antes: 'git checkout -- . && git clean -fd'"
   fi
   return 1
 }
@@ -1754,10 +1943,12 @@ stop_dashboard() {
 # sem cursor.
 on_exit() {
   local code=$?
-  if [ -n "${META[status]:-}" ] && [ "${META[status]}" = "running" ]; then
+  # waiting tambem: Ctrl-C durante a espera por limite de uso mata o run.
+  if [ "${META[status]:-}" = "running" ] || [ "${META[status]:-}" = "waiting" ]; then
     META[status]="failed"
     META[ended]="$(date +%s)"
     state_flush
+    notify project.failed "" "Ralph encerrou antes do fim (saida $code: Ctrl-C, sinal ou abort)."
   fi
   stop_dashboard
   exit "$code"
@@ -1810,6 +2001,7 @@ main() {
   start_time=$(date +%s)
   echo ""
   log "Inicio: $(date '+%d/%m/%Y %H:%M:%S')"
+  notify project.started
 
   local seq=0
   local failed_phases=() skipped_phases=() completed_phases=()
@@ -1858,6 +2050,14 @@ main() {
   # sempre a ultima acao de uma sessao que ja terminou.
   : > "$LIVE_STATE"
   state_flush
+
+  if [ ${#failed_phases[@]} -eq 0 ]; then
+    notify project.completed
+  else
+    local failed_list
+    failed_list=$(printf '%s, ' "${failed_phases[@]}")
+    notify project.failed "" "Fases com falha: ${failed_list%, }"
+  fi
 
   # O painel some com a tela alternativa: o relatorio final tem que sair depois,
   # no terminal de verdade, senao o run termina sem deixar rastro na rolagem.

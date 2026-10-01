@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ralph Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@800&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0b0d11; --card: #1a1f2b; --line: #2a3142; --text: #e8edf5; --muted: #8a94a8;
+    --red: #e11d2e; --green: #3dd68c; --amber: #f5c542; --blue: #6ea8ff; --grey: #4a5366;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; color: var(--text); font: 14px/1.45 "IBM Plex Sans", system-ui, sans-serif;
+    background:
+      radial-gradient(900px 500px at 0 0, rgba(225, 29, 46, .16), transparent 60%),
+      var(--bg);
+  }
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; opacity: .04;
+    background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  }
+  main { max-width: 1400px; margin: 0 auto; padding: 28px 16px 48px; position: relative; }
+  .mono { font-family: var(--mono); }
+  header { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; }
+  .brand { font: 800 56px/1 "Barlow Condensed", sans-serif; letter-spacing: .02em; }
+  .brand b { color: var(--red); font-weight: 800; }
+  .summary { text-align: right; }
+  .summary .big { font: 600 22px var(--mono); }
+  .summary .small { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .bar { height: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; margin: 18px 0 10px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--red); transition: width .4s; }
+  .metaline { font: 12px var(--mono); color: var(--muted); margin-bottom: 14px; }
+  .chips { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-bottom: 24px; }
+  .chip { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px;
+          font: 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chip.running { border-color: var(--red); }
+  .chip .dot { margin-right: 6px; }
+  .cols { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; align-items: start; }
+  .col h2 { font: 600 12px var(--mono); text-transform: uppercase; letter-spacing: .12em; color: var(--muted);
+            margin: 0 0 10px; display: flex; justify-content: space-between; }
+  .stack { display: flex; flex-direction: column; gap: 12px; }
+  .card { position: relative; background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 14px 14px 14px 18px; overflow: hidden; }
+  .card::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--c); }
+  .s-pending, .s-skipped { --c: var(--grey); }
+  .s-running, .s-failed { --c: var(--red); }
+  .s-done { --c: var(--green); }
+  .s-incomplete { --c: var(--amber); }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .num { font: 600 12px var(--mono); color: var(--muted); }
+  .pill { font: 600 11px var(--mono); text-transform: uppercase; padding: 2px 8px; border-radius: 99px;
+          color: var(--c); border: 1px solid var(--c); }
+  .title { font-size: 18px; font-weight: 600; margin: 6px 0 4px; }
+  .dur { font: 12px var(--mono); color: var(--muted); }
+  .desc { color: #b8c1d3; margin: 8px 0 0; }
+  .files, .gates { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .file { font: 11px var(--mono); background: var(--bg); border: 1px solid var(--line); border-radius: 4px; padding: 1px 6px;
+          max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .gate { font: 11px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--bg); color: var(--muted); }
+  .gate.pass { color: var(--green); } .gate.run { color: var(--blue); } .gate.fail { color: var(--red); }
+  .tasks { list-style: none; margin: 12px 0 0; padding: 0; display: flex; flex-direction: column; gap: 5px; }
+  .tasks li { display: grid; grid-template-columns: 10px 1fr auto; gap: 8px; align-items: baseline; font-size: 13px; }
+  .tasks .st { font: 10px var(--mono); text-transform: uppercase; color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--c); }
+  .s-running .dot, .dot.s-running { box-shadow: 0 0 0 3px rgba(225, 29, 46, .3); }
+  .activity { margin-top: 12px; font: 12px var(--mono); color: var(--blue); border-top: 1px solid var(--line); padding-top: 8px; }
+  .idle { text-align: center; color: var(--muted); padding: 40px 12px; }
+  .idle code { display: block; margin-top: 10px; color: var(--text); font-family: var(--mono); }
+  .err { color: var(--amber); font: 12px var(--mono); min-height: 1em; }
+  @media (max-width: 980px) {
+    .cols { grid-template-columns: 1fr; }
+    .brand { font-size: 42px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="brand">RAL<b>PH</b></div>
+    <div class="summary">
+      <div class="big" id="phasesDone">–</div>
+      <div class="small" id="tasksPct">–</div>
+    </div>
+  </header>
+  <div class="bar"><div id="bar" style="width:0"></div></div>
+  <div class="metaline" id="metaline"></div>
+  <div class="chips" id="chips"></div>
+  <div class="err" id="err"></div>
+  <div class="cols">
+    <section class="col"><h2>Backlog <span id="n-backlog"></span></h2><div class="stack" id="backlog"></div></section>
+    <section class="col"><h2>In Progress <span id="n-progress"></span></h2><div class="stack" id="progress"></div></section>
+    <section class="col"><h2>Done <span id="n-done"></span></h2><div class="stack" id="done"></div></section>
+  </div>
+</main>
+<script>
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+const colOf = (status) => {
+  if (status === "done") return "done";
+  if (status === "running" || status === "failed") return "progress";
+  return "backlog";
+};
+
+const cls = (status) => "s-" + String(status).replace(/[^a-z]/g, "");
+const $ = (id) => document.getElementById(id);
+
+function card(p, meta) {
+  const current = String(meta.phase_cur) === String(p.num) && p.status === "running";
+  return `<article class="card ${cls(p.status)}">
+    <div class="row"><span class="num">Phase ${esc(p.num)}</span><span class="pill">${esc(p.status)}</span></div>
+    <div class="title">${esc(p.title)}</div>
+    <div class="dur">◷ ${esc(p.duration || "—")}${p.attempt && p.attempt !== "0" ? ` · ciclo ${esc(p.attempt)}` : ""}</div>
+    ${p.description ? `<p class="desc">${esc(p.description)}</p>` : ""}
+    ${p.files.length ? `<div class="files">${p.files.map(f => `<span class="file" title="${esc(f)}">${esc(f)}</span>`).join("")}</div>` : ""}
+    <div class="gates">${p.gates.map((g, i) => `<span class="gate ${esc(g)}">G${i} ${esc(g)}</span>`).join("")}</div>
+    ${p.tasks.length ? `<ul class="tasks">${p.tasks.map(t => `<li class="${cls(t.status)}">
+      <span class="dot"></span><span>${esc(t.title)}</span><span class="st">${esc(t.status)}</span></li>`).join("")}</ul>` : ""}
+    ${current && meta.activity ? `<div class="activity">${esc(meta.activity)}</div>` : ""}
+  </article>`;
+}
+
+function render(s) {
+  const cols = { backlog: [], progress: [], done: [] };
+  if (s.idle) {
+    $("phasesDone").textContent = "–";
+    $("tasksPct").textContent = "sem run";
+    $("bar").style.width = "0";
+    $("metaline").textContent = s.repo || "";
+    $("chips").innerHTML = "";
+    cols.progress.push(`<div class="idle">Nenhum run em .phases/state/.
+      <code>ralph --engine claude</code><code>ralph --engine codex</code></div>`);
+  } else {
+    const c = s.counts, m = s.meta;
+    $("phasesDone").textContent = `${c.done_phases}/${c.total_phases} Completed`;
+    $("tasksPct").textContent = `${c.pct}% of ${c.total_tasks} tasks`;
+    $("bar").style.width = c.pct + "%";
+    $("metaline").textContent = [m.project, m.engine, m.status, m.gate].filter(Boolean).join(" · ");
+    $("chips").innerHTML = s.phases.map(p =>
+      `<div class="chip ${p.status === "running" ? "running" : ""} ${cls(p.status)}" title="${esc(p.title)}">
+        <span class="dot"></span>${esc(p.num)} ${esc(p.title)}</div>`).join("");
+    for (const p of s.phases) cols[colOf(p.status)].push(card(p, m));
+  }
+  for (const k in cols) {
+    $(k).innerHTML = cols[k].join("");
+    $("n-" + k).textContent = s.idle ? "" : cols[k].length;
+  }
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/state.json?ts=" + Date.now(), { cache: "no-store" });
+    render(await r.json());
+    $("err").textContent = "";
+  } catch (e) {
+    $("err").textContent = "quadro sem conexao com ralph-board.py — ultimo estado mantido";
+  }
+}
+tick();
+setInterval(tick, 1000);
+</script>
+</body>
+</html>

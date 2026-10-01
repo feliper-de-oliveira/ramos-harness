@@ -69,6 +69,7 @@ bump() {
 
 model=""
 outfmt=""
+last=""
 
 if [ "$name" = "claude" ]; then
   # claude -p real le stdin quando nao e TTY: se o ralph nao redirecionar
@@ -88,6 +89,9 @@ else
     case "$1" in
       --sandbox) [ "$2" = "read-only" ] && verify=1; shift 2 ;;
       --model) model="$2"; shift 2 ;;
+      -o) last="$2"; shift 2 ;;
+      -c) echo "$2" >> "$state/codex_config"; shift 2 ;;
+      --json) outfmt="json"; shift ;;
       *) shift ;;
     esac
   done
@@ -106,6 +110,12 @@ fi
 # implementacao no repo, a fase esta incompleta.
 if [ "$verify" -eq 1 ]; then
   n=$(bump verify_calls)
+  if [ "$name" = "codex" ]; then
+    echo "exec cat src/impl-1.txt"
+    echo "CODIGO_LIDO_PELO_VERIFICADOR"
+    # a resposta final vai para o arquivo do -o; o stdout ainda a repete
+    exec > >(tee "${last:-/dev/null}") 
+  fi
   tasks=$(grep -cE '^[[:space:]]*- \[[ x]\]' <<< "$prompt")
 
   implemented=0
@@ -154,6 +164,21 @@ case "$scenario" in
   limit-epoch)
     if [ "$n" -eq 1 ]; then
       emit_claude_limit "$(date +%s)"
+      exit 1
+    fi
+    ;;
+  limit-partial)
+    if [ "$n" -eq 1 ]; then
+      mkdir -p src && echo partial > src/partial.txt
+      emit_claude_limit "$(date +%s)"
+      exit 1
+    fi
+    ;;
+  limit-codex)
+    if [ "$n" -eq 1 ]; then
+      echo '{"type":"thread.started","thread_id":"t-1"}'
+      echo '{"type":"error","message":"You\u0027ve hit your usage limit. Upgrade to Pro or try again later."}'
+      echo '{"type":"turn.failed","error":{"message":"You\u0027ve hit your usage limit. Upgrade to Pro or try again later."}}'
       exit 1
     fi
     ;;
@@ -209,7 +234,29 @@ if [ "$name" = "claude" ]; then
       emit_stream_tasks "$n_tasks" "$n_tasks"
     fi
   fi
+  # blocked: o agente pede um humano. blocked-mold: so CITA o molde do prompt,
+  # o que nao e bloqueio.
+  if [ "$scenario" = "blocked" ]; then
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Nao da para seguir.\nRALPH-BLOCKED: definir a estrategia de autenticacao (JWT ou sessao)\n"}]}}'
+  elif [ "$scenario" = "blocked-mold" ]; then
+    echo '{"type":"assistant","message":{"content":[{"type":"text","text":"Sem bloqueio; o formato seria RALPH-BLOCKED: <motivo>."}]}}'
+  fi
   emit_claude_ok
+elif [ "$outfmt" = "json" ]; then
+  # Eventos reais do `codex exec --json` (formato capturado do CLI 0.144).
+  echo '{"type":"thread.started","thread_id":"t-1"}'
+  echo '{"type":"turn.started"}'
+  echo '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Vou implementar.\n\nRALPH-TASK 1 START"}}'
+  echo '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/zsh -lc \u0027cat src/x\u0027","aggregated_output":"","exit_code":null,"status":"in_progress"}}'
+  echo '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/usr/bin/zsh -lc ls","aggregated_output":"CODIGO_ESCRITO_PELO_AGENTE\n","exit_code":0,"status":"completed"}}'
+  echo "{\"type\":\"item.completed\",\"item\":{\"id\":\"item_2\",\"type\":\"file_change\",\"changes\":[{\"path\":\"$PWD/src/impl-$n.txt\",\"kind\":\"add\"}],\"status\":\"completed\"}}"
+  if [ "$scenario" = "codex-turn-failed" ]; then
+    echo '{"type":"error","message":"stream disconnected before completion"}'
+    echo '{"type":"turn.failed","error":{"message":"stream disconnected before completion"}}'
+    exit 1
+  fi
+  echo '{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"RALPH-TASK 1 DONE"}}'
+  echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
 else
   echo "Done."
 fi
@@ -345,6 +392,7 @@ run_ralph() {
     RALPH_LIMIT_BUFFER=1 \
     RALPH_VERIFY="${CASE_VERIFY:-}" \
     RALPH_VERIFY_MODEL="${CASE_VERIFY_MODEL:-}" \
+    RALPH_NOTIFY_BIN="${CASE_NOTIFY_BIN:-/nonexistent}" \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
   echo "$rc"
@@ -363,9 +411,20 @@ run_ralph_env() {
     MOCK_TEST_CMD="$dir/test.sh" \
     RALPH_LIMIT_WAIT_DEFAULT=1 \
     RALPH_LIMIT_BUFFER=1 \
+    RALPH_NOTIFY_BIN=/nonexistent \
       bash "$RALPH" "$@" > "$dir/out.log" 2>&1
   ) || rc=$?
   echo "$rc"
+}
+
+# notify.sh falso: registra "evento|fase|1a linha do detalhe" em state/events.
+make_notify_stub() {
+  cat > "$1" <<'STUB'
+#!/usr/bin/env bash
+printf '%s|%s|%s\n' "$1" "${2:-}" "${3%%$'\n'*}" >> "${MOCK_STATE:?}/events"
+[ -f "${RALPH_STATE_FILE:-}" ] && echo "[notification] stub $1 sent"
+exit 0
+STUB
 }
 
 commits() { git -C "$1/repo" rev-list --count HEAD; }
@@ -454,6 +513,27 @@ if case_enabled limit-epoch; then
 fi
 
 # ---------------------------------------------------------------------------
+# 5b. Aborto no limite com trabalho parcial -> commit wip, re-run nao trava
+# ---------------------------------------------------------------------------
+if case_enabled limit-abort-resume; then
+  header "5b. aborto no limite com arvore suja -> re-run salva wip e retoma"
+  d=$(new_case limit-abort-resume)
+  rc=$(RALPH_MAX_LIMIT_WAITS=0 run_ralph_env "$d" limit-partial --engine claude --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "exit 1 (cap de esperas)"
+  assert_contains <(git -C "$d/repo" status --porcelain) "src/" "trabalho parcial ficou na arvore"
+  # Projeto que versionou .phases/ por engano: estado do ralph nao pode sujar a arvore.
+  git -C "$d/repo" add -f .phases && git -C "$d/repo" commit -q -m "track phases"
+  rc=$(run_ralph "$d" limit-partial --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "re-run passa do preflight e conclui"
+  assert_not_contains "$d/out.log" "Arvore de trabalho suja" "sem erro de arvore suja"
+  assert_contains "$d/out.log" "Run anterior parou na fase" "detectou onde parou"
+  assert_contains <(git -C "$d/repo" log --format=%s) "wip(phase-" "trabalho parcial em commit wip"
+  assert_eq "" "$(git -C "$d/repo" status --porcelain -- . ':(exclude).phases')" "arvore limpa no fim"
+  assert_contains "$d/out.log" ".phases/ esta versionado" "avisou do .phases versionado"
+  assert_eq "" "$(git -C "$d/repo" log --format= --name-only HEAD~3..HEAD -- .phases)" "commits das fases nao levam .phases"
+fi
+
+# ---------------------------------------------------------------------------
 # 6. Limite generico sem epoch -> fallback wait
 # ---------------------------------------------------------------------------
 if case_enabled limit-generic; then
@@ -462,6 +542,48 @@ if case_enabled limit-generic; then
   rc=$(run_ralph "$d" limit-generic --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
   assert_eq 0 "$rc" "exit 0"
   assert_contains "$d/out.log" "Sem horario de reset no output" "usou o fallback de espera"
+  assert_eq 3 "$(commits "$d")" "fases commitadas apos a espera"
+fi
+
+# ---------------------------------------------------------------------------
+# 6b. Codex: terminal mostra atividade e progresso, nunca o codigo
+# ---------------------------------------------------------------------------
+if case_enabled codex-quiet; then
+  header "6b. codex --json: sem codigo no terminal, progresso por task"
+  d=$(new_case codex-quiet)
+  rc=$(run_ralph "$d" ok --engine codex --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(commits "$d")" "fases commitadas"
+  assert_not_contains "$d/out.log" "CODIGO_ESCRITO_PELO_AGENTE" "output de comando do agente fora do terminal"
+  assert_not_contains "$d/out.log" "CODIGO_LIDO_PELO_VERIFICADOR" "codigo lido pelo verificador fora do terminal"
+  assert_not_contains "$d/out.log" '"type":"' "nenhum evento JSON cru no terminal"
+  assert_contains "$d/out.log" "task 1 concluida" "RALPH-TASK do codex vira progresso"
+  assert_contains "$d/repo/.phases/logs/phase-01.cycle-1.log" "CODIGO_ESCRITO_PELO_AGENTE" "log da sessao guarda tudo"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "RALPH-TASK" "prompt do codex tem o protocolo"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "Execucao autonoma" "prompt manda nao parar para perguntar"
+  assert_eq 0 "$(grep -vcx 'model_reasoning_effort=medium' "$d/state/codex_config")" "effort medium por default em toda sessao"
+  d=$(new_case codex-effort)
+  rc=$(run_ralph "$d" ok --engine codex --effort high --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0 com --effort high"
+  assert_contains "$d/state/codex_config" "model_reasoning_effort=high" "--effort chega no codex"
+  rc=$(run_ralph "$d" ok --engine codex --effort turbo --test-cmd "$d/test.sh")
+  assert_eq 1 "$rc" "--effort invalido aborta"
+fi
+
+if case_enabled codex-turn-failed; then
+  header "6c. codex turn.failed -> gate 0 vermelho"
+  d=$(new_case codex-turn-failed)
+  rc=$(run_ralph "$d" codex-turn-failed --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 1 "$rc" "exit 1"
+  assert_contains "$d/out.log" "codex nao concluiu o turno" "causa do gate 0 explicita"
+fi
+
+if case_enabled limit-codex; then
+  header "6d. limite do codex (hit your usage limit) -> espera, mesma fase"
+  d=$(new_case limit-codex)
+  rc=$(run_ralph "$d" limit-codex --engine codex --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_eq 0 "$rc" "exit 0 (limite nao consome ciclo)"
+  assert_contains "$d/out.log" "Limite de uso atingido" "limite do codex detectado"
   assert_eq 3 "$(commits "$d")" "fases commitadas apos a espera"
 fi
 
@@ -598,6 +720,9 @@ if case_enabled dirty-after-fail; then
   assert_eq 1 "$(commits "$d")" "nenhum commit"
   assert_contains "$d/out.log" "trabalho parcial desta fase ficou na arvore" "avisou sobre a arvore suja"
   assert_contains "$d/out.log" "git clean -fd" "deu a saida de descarte"
+  rc=$(run_ralph "$d" verify-incomplete-once --engine claude --test-cmd "$d/test.sh" --max-cycles 1)
+  assert_not_contains "$d/out.log" "Arvore de trabalho suja" "re-run retoma em vez de abortar"
+  assert_contains "$d/out.log" "Run anterior parou na fase" "re-run detectou a fase interrompida"
 fi
 
 # ---------------------------------------------------------------------------
@@ -1375,6 +1500,119 @@ if case_enabled watch-frame; then
   else
     ok "tmux ausente — integracao do quadro pulada"
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# Quadro web: ralph-board.py --once le o estado de um run real
+# ---------------------------------------------------------------------------
+if case_enabled board; then
+  header "quadro web (ralph-board.py --once)"
+  BOARD="$ROOT/scripts/ralph-board.py"
+  d=$(new_case board)
+
+  python3 "$BOARD" --once "$d/repo" > "$d/idle.json"
+  assert_contains "$d/idle.json" '"idle": true' "sem run.tsv: idle"
+
+  rc=$(run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "run base verde"
+  python3 "$BOARD" --once "$d/repo" > "$d/board.json"
+  bj() { python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print($1)" "$d/board.json"; }
+  assert_eq "2/2" "$(bj 'str(d["counts"]["done_phases"]) + "/" + str(d["counts"]["total_phases"])')" "fases concluidas contadas"
+  assert_eq "100" "$(bj 'd["counts"]["pct"]')" "pct das tasks"
+  assert_eq "Foundation" "$(bj 'd["phases"][0]["title"]')" "titulo da fase"
+  assert_eq "True" "$(bj 'bool(d["phases"][0]["duration"])')" "duracao vinda de tdur_N"
+  assert_eq "cria o arquivo A" "$(bj 'd["phases"][0]["tasks"][0]["title"]')" "tasks da fase"
+
+  # live.tsv promove task pendente, nunca rebaixa task done
+  sed -i 's/^TASK\t2\t1\tdone/TASK\t2\t1\tpending/' "$d/repo/.phases/state/run.tsv"
+  printf 'PHASE\t1\nACTIVITY\tlendo\nLIVE\t1\trunning\nPHASE\t2\nLIVE\t1\trunning\n' > "$d/repo/.phases/state/live.tsv"
+  python3 "$BOARD" --once "$d/repo" > "$d/board.json"
+  assert_eq "done" "$(bj 'd["phases"][0]["tasks"][0]["status"]')" "live nao rebaixa task done"
+  assert_eq "running" "$(bj 'd["phases"][1]["tasks"][0]["status"]')" "live promove task pendente"
+  assert_eq "lendo" "$(bj 'd["meta"]["activity"]')" "atividade do live"
+  unset -f bj
+fi
+
+# ---------------------------------------------------------------------------
+# 39. Notificacoes: o ralph emite os eventos do run, na ordem, para o notify.sh
+#     ao lado — com o run.tsv (fonte unica do painel) disponivel.
+# ---------------------------------------------------------------------------
+if case_enabled notify-events; then
+  header "39. notificacoes: eventos de um run verde"
+  d=$(new_case notify-events)
+  make_notify_stub "$d/notify.sh"
+  rc=$(CASE_NOTIFY_BIN="$d/notify.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq "project.started|| phase.started|1| phase.completed|1| phase.started|2| phase.completed|2| project.completed||" \
+    "$(tr '\n' ' ' < "$d/state/events" | sed 's/ $//')" "eventos na ordem"
+  assert_contains "$d/out.log" "[notification] stub project.completed sent" "notify le o run.tsv do ralph e o log mostra o envio"
+fi
+
+# ---------------------------------------------------------------------------
+# 40. Notificacao quebrada nunca derruba o run.
+# ---------------------------------------------------------------------------
+if case_enabled notify-broken; then
+  header "40. notify.sh quebrado -> run segue verde"
+  d=$(new_case notify-broken)
+  printf '#!/usr/bin/env bash\necho "[notification] boom"\nexit 7\n' > "$d/notify.sh"
+  rc=$(CASE_NOTIFY_BIN="$d/notify.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(commits "$d")" "fases commitadas"
+  assert_contains "$d/out.log" "[notification] boom" "falha aparece no log"
+fi
+
+# ---------------------------------------------------------------------------
+# 41. RALPH-BLOCKED: o agente pede um humano -> needs.input, fase para SEM
+#     ciclo de correcao (queimaria tokens contra o mesmo bloqueio).
+# ---------------------------------------------------------------------------
+if case_enabled notify-blocked; then
+  header "41. RALPH-BLOCKED -> needs.input e fase parada"
+  d=$(new_case notify-blocked)
+  make_notify_stub "$d/notify.sh"
+  rc=$(CASE_NOTIFY_BIN="$d/notify.sh" run_ralph "$d" blocked --engine claude --test-cmd "$d/test.sh" --max-cycles 3)
+  assert_eq 1 "$rc" "exit 1"
+  assert_eq 1 "$(cat "$d/state/impl_calls")" "nenhum ciclo de correcao"
+  assert_contains "$d/state/events" "needs.input|1|definir a estrategia de autenticacao (JWT ou sessao)" "needs.input com o motivo"
+  assert_contains "$d/state/events" "project.failed||" "run termina como falho"
+  assert_not_contains "$d/state/events" "phase.failed" "needs.input substitui phase.failed"
+  assert_contains "$d/repo/.phases/state/run.tsv" "bloqueado: definir a estrategia" "painel ve o bloqueio em last_error"
+  assert_contains "$d/repo/.phases/prompts/phase-01.cycle-1.txt" "RALPH-BLOCKED:" "prompt ensina o marcador"
+
+  d=$(new_case notify-blocked-mold)
+  make_notify_stub "$d/notify.sh"
+  rc=$(CASE_NOTIFY_BIN="$d/notify.sh" run_ralph "$d" blocked-mold --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "citar o molde '<motivo>' nao e bloqueio"
+fi
+
+# ---------------------------------------------------------------------------
+# 42. Engine falha (gate 0) ate o fim dos ciclos -> agent.failed por ciclo,
+#     phase.failed e project.failed.
+# ---------------------------------------------------------------------------
+if case_enabled notify-failed; then
+  header "42. falha -> agent.failed, phase.failed, project.failed"
+  d=$(new_case notify-failed)
+  make_notify_stub "$d/notify.sh"
+  rc=$(CASE_NOTIFY_BIN="$d/notify.sh" run_ralph "$d" codex-turn-failed --engine codex --test-cmd "$d/test.sh" --max-cycles 2)
+  assert_eq 1 "$rc" "exit 1"
+  assert_eq 2 "$(grep -c '^agent.failed|1|O codex nao concluiu o turno' "$d/state/events")" "agent.failed em cada ciclo, com a causa"
+  assert_contains "$d/state/events" "phase.failed|1|Reprovada apos 2 ciclos" "phase.failed"
+  assert_contains "$d/state/events" "project.failed||Fases com falha: Foundation" "project.failed lista as fases"
+fi
+
+# ---------------------------------------------------------------------------
+# 43. notify.sh real + Telegram fora do ar: o run segue e o log diz por que.
+# ---------------------------------------------------------------------------
+if case_enabled notify-real-offline; then
+  header "43. notify.sh real com Telegram inacessivel -> run verde"
+  d=$(new_case notify-real-offline)
+  rc=$(export BC_HARNESS_NOTIFY_CONFIG=/nonexistent TELEGRAM_BOT_TOKEN=123:secretTOKEN \
+         TELEGRAM_CHAT_ID=42 TELEGRAM_API_BASE=http://127.0.0.1:9 NOTIFICATIONS_ENABLED=true NOTIFY_EVENTS=all; \
+       CASE_NOTIFY_BIN="$ROOT/scripts/notify.sh" run_ralph "$d" ok --engine claude --test-cmd "$d/test.sh")
+  assert_eq 0 "$rc" "exit 0"
+  assert_eq 3 "$(commits "$d")" "fases commitadas"
+  assert_contains "$d/out.log" "[notification] telegram project.completed failed: sem conexao" "falha registrada"
+  assert_contains "$d/out.log" "continuing execution" "run segue"
+  assert_not_contains "$d/out.log" "secretTOKEN" "token nunca no log"
 fi
 
 # ---------------------------------------------------------------------------
